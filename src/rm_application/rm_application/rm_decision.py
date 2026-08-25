@@ -1,9 +1,10 @@
 from rclpy.node import Node
-from rm_interfaces.msg import Decision 
+from rm_interfaces.msg import Decision, EnemyCenter
 from geometry_msgs.msg import PoseStamped
 from nav2_simple_commander.robot_navigator import BasicNavigator
 import rclpy
-from std_msgs.msg import Int32
+import math
+from std_msgs.msg import Int32, Bool
 class DecisionNode(Node):
     def __init__(self):
         super().__init__('decision_node')
@@ -19,6 +20,24 @@ class DecisionNode(Node):
         self.sub_decision = self.create_subscription(Decision, "/nav/decision", self.decision_msg_callback, 10)
         self.sub_vision = self.create_subscription(Decision, "/vision/decision", self.vision_callback, 10)
         self.pub_gimbal_mode = self.create_publisher(Int32, "/gimbal_mode", 1)
+        # 追击触发发布者
+        self.pub_chase_trigger = self.create_publisher(Bool, "/nav/chase_trigger", 10)
+        # 订阅敌人数据（用于判断是否触发追击）
+        from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+        enemy_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self.sub_enemy = self.create_subscription(
+            EnemyCenter,
+            '/tracker/enemy_datas',
+            self.enemy_callback,
+            enemy_qos
+        )
+        self.enemy_tracked = False  # 当前敌人是否被跟踪
+        self.enemy_distance = None  # 敌人距离（米）
         self.timer = self.create_timer(0.5, self.timer_callback)
     def create_pose_stamped(self, x, y):
         pose = PoseStamped()
@@ -53,9 +72,14 @@ class DecisionNode(Node):
                 ('to_center_param3', [4.45, 0.20]),
                 ('hp_limit', 150),
                 ('hp_up', 380),
-
+                ('chase_min_distance', 0.5),
+                ('chase_max_distance', 8.0),
             ]
         )
+        # 追击距离过滤参数
+        self.chase_min_distance = self.get_parameter("chase_min_distance").value
+        self.chase_max_distance = self.get_parameter("chase_max_distance").value
+
         self.to_center_poses = []
         self.defences = []
         self.defences_behind = []
@@ -112,6 +136,16 @@ class DecisionNode(Node):
 
     def vision_callback(self, msg):
         pass
+
+    def enemy_callback(self, msg: EnemyCenter):
+        """订阅敌人数据，更新跟踪状态和距离"""
+        self.enemy_tracked = msg.tracked
+        if msg.tracked:
+            # 相机坐标系下计算距离（z前、x右、y下）
+            self.enemy_distance = math.sqrt(msg.x**2 + msg.y**2 + msg.z**2)
+        else:
+            self.enemy_distance = None
+
     def send_goal(self, pose_or_waypoints, is_waypoint=False):
         """统一发送目标的辅助函数，实时更新时间戳"""
         now = self.get_clock().now().to_msg()
@@ -160,6 +194,8 @@ class DecisionNode(Node):
             gimbal_mode = 1
         if new_flag != self.decision_flag:
             self.get_logger().info(f"切换状态至: {new_flag}")
+            # 状态切换时停止追击
+            self.pub_chase_trigger.publish(Bool(data=False))
             self.decision_flag = new_flag
             self.navigator.cancelTask() # 切换时立即中断当前动作
         self.pub_gimbal_mode.publish(Int32(data=gimbal_mode))
@@ -169,6 +205,21 @@ class DecisionNode(Node):
         if not self.navigator.isTaskComplete():
             return
         
+        # 防守状态下检测到敌人时，触发追击（含距离过滤）
+        if self.decision_flag == "DEFENCE" and self.enemy_tracked:
+            if self.enemy_distance is not None:
+                if self.chase_min_distance <= self.enemy_distance <= self.chase_max_distance:
+                    self.get_logger().info(
+                        f"防守中检测到敌人，距离 {self.enemy_distance:.2f}m，触发追击"
+                    )
+                    self.pub_chase_trigger.publish(Bool(data=True))
+                    return  # 由 chase_client 接管导航
+                else:
+                    self.get_logger().info(
+                        f"敌人距离 {self.enemy_distance:.2f}m 不在追击范围 "
+                        f"[{self.chase_min_distance}, {self.chase_max_distance}]，跳过"
+                    )
+
         match self.decision_flag:
             case "OCCUPY_BEGIN":
                 self.get_logger().info("开始抢点")

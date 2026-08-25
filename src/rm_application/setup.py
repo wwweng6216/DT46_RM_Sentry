@@ -35,6 +35,8 @@ setup(
             "serial_node = rm_application.serial_node:main",
             "mock_serial_sender = rm_application.mock_serial_sender:main",
             "rm_decision = rm_application.rm_decision:main",
+            "target_pose_server = rm_application.target_pose_server:main",
+            "chase_client = rm_application.chase_client:main",
 
 
         ],
