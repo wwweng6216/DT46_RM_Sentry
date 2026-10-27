@@ -124,6 +124,7 @@ class SerialNode(Node):
         self.serial_send_header = self.get_parameter("serial_send_header").value
         self.pub_rpy = self.get_parameter("pub_rpy").value
         self.pub_serial_debug = self.get_parameter("pub_serial_debug").value
+        self.last_gimbal_time = 0.0
 
         # 3. 打印当前生效的配置信息，方便在终端确认 YAML 是否加载成功
         self.get_logger().info("-" * 30)
@@ -133,6 +134,7 @@ class SerialNode(Node):
         self.get_logger().info(f"  超时设置: Read={self.timeout}s, Write={self.write_timeout}s")
         self.get_logger().info(f"  校验/流控: Parity={self.parity}, Flow={self.flow_control}")
         self.get_logger().info("-" * 30)
+
     def cmd_vel_callback(self,msg):
         with self.lock:
             self.send_datas.linear_velocity_x = msg.linear.x
@@ -146,6 +148,8 @@ class SerialNode(Node):
             self.send_datas.pitch = msg.pitch
             self.send_datas.yaw = msg.yaw
             self.send_datas.can_fire = msg.can_fire
+            self.send_datas.yaw_rate = msg.yaw_rate
+            self.last_gimbal_time = time.monotonic()
 
     def receive_data(self):
         serial_decision_msg = Decision()
@@ -389,6 +393,7 @@ class SerialNode(Node):
                 pitch = self.send_datas.pitch
                 can_fire = self.send_datas.can_fire
                 gimbal_mode = self.send_datas.gimbal_mode
+                yaw_rate = self.send_datas.yaw_rate
                 # yaw = 0
                 # pitch = 0
                 # can_fire = 0
@@ -396,6 +401,11 @@ class SerialNode(Node):
             #帧头，帧尾赋值
             # self.send_datas.header = b'\xA5'
             # self.send_datas.ender  = b'\x2b'
+
+            if time.monotonic() - self.last_gimbal_time > 0.15:
+                yaw_rate = 0.0
+                can_fire = 0
+
             header = self.serial_send_header
 
             #帧头，x线速度，y线速度，小陀螺模式， 云台yaw，云台pitc，开火，帧尾
@@ -409,6 +419,7 @@ class SerialNode(Node):
                 yaw,
                 pitch,
                 can_fire,
+                yaw_rate
                 )
 
             checksum = get_crc16_check_sum(data_payload)
